@@ -102,6 +102,7 @@
             width: 100vw;
             overflow: hidden;
             display: flex;
+            content-visibility: auto;
         }
 
         #sidebar {
@@ -112,6 +113,7 @@
             flex-direction: column;
             z-index: 20;
             flex-shrink: 0;
+            will-change: transform;
         }
 
         .sidebar-header {
@@ -339,6 +341,7 @@
             align-items: center;
             justify-content: center;
             backdrop-filter: blur(10px);
+            contain: strict;
         }
 
         .modal-overlay.active {
@@ -473,21 +476,21 @@
                 </button>
 
                 <div class="preview-controls">
-                    <button class="control-btn" id="paste-direct-btn" onclick="pasteFromClipboard()">Paste HTML</button>
-                    <button class="control-btn" onclick="openPasteModal()">Manual Edit</button>
+                    <button class="control-btn" onclick="openPasteModal()">Paste HTML</button>
                     <button class="control-btn" onclick="clearPreview()">Delete</button>
                 </div>
             </div>
         </div>
     </main>
 
+    <!-- Updated File Input to support .html specifically -->
     <input type="file" id="file-input" accept=".html" style="display: none">
 
     <!-- Modals -->
     <div id="paste-modal" class="modal-overlay">
         <div class="modal">
-            <h3>Edit HTML</h3>
-            <textarea id="paste-editor" class="textarea-field" spellcheck="false" placeholder="Paste or edit your HTML here..."></textarea>
+            <h3>Paste HTML</h3>
+            <textarea id="paste-editor" class="textarea-field" spellcheck="false" placeholder="Paste your HTML here..."></textarea>
             <div style="display: flex; justify-content: flex-end; gap: 10px;">
                 <button class="btn" onclick="closePasteModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="applyPaste()">Run Code</button>
@@ -497,7 +500,7 @@
 
     <div id="optimizer-modal" class="modal-overlay">
         <div class="modal">
-            <h3>Optimizer</h3>
+            <h3 style="margin-top: 0; margin-bottom: 12px;">Optimizer</h3>
             <textarea id="optimizer-editor" class="textarea-field" spellcheck="false" placeholder="Paste code to optimize..."></textarea>
             <div style="display: flex; justify-content: flex-end; gap: 10px;">
                 <button class="btn" onclick="closeOptimizerModal()">Cancel</button>
@@ -521,6 +524,9 @@
     <script>
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = firebase.initializeApp(firebaseConfig);
+        
+        // Fix for "Could not reach Cloud Firestore backend"
+        // This force uses long-polling which is more reliable in sandbox/iframe environments
         const db = firebase.firestore(app);
         db.settings({ experimentalForceLongPolling: true });
         
@@ -538,6 +544,7 @@
 
         let currentCode = "";
         let favorites = [];
+        let currentTheme = "gray";
         let sortableInstance = null;
         let currentUser = null;
 
@@ -556,12 +563,16 @@
                 } else {
                     await auth.signInAnonymously();
                 }
-            } catch (e) { console.error("Auth failed", e); }
+            } catch (e) {
+                console.error("Auth initialization failed", e);
+            }
         }
 
         auth.onAuthStateChanged(user => {
             currentUser = user;
-            if (user) loadCloudData();
+            if (user) {
+                loadCloudData();
+            }
         });
 
         initAuth();
@@ -572,11 +583,18 @@
             publicRef.onSnapshot(doc => {
                 if (doc.exists) {
                     const data = doc.data();
-                    if (data.favorites) { favorites = data.favorites; renderFavorites(); }
-                    if (data.lastCode && !currentCode && !localStorage.getItem('saved_code')) runCode(data.lastCode);
-                    if (data.theme && !localStorage.getItem('saved_theme')) setTheme(data.theme, false);
+                    if (data.favorites) {
+                        favorites = data.favorites;
+                        renderFavorites();
+                    }
+                    if (data.lastCode && !currentCode && !localStorage.getItem('saved_code')) {
+                        runCode(data.lastCode);
+                    }
+                    if (data.theme && !localStorage.getItem('saved_theme')) {
+                        setTheme(data.theme, false);
+                    }
                 }
-            }, err => console.error(err));
+            }, err => console.error("Firestore Error:", err));
         }
 
         async function updateCloudState(newCode, newFavs, newTheme) {
@@ -585,29 +603,26 @@
             if (newCode !== undefined) data.lastCode = newCode;
             if (newFavs !== undefined) data.favorites = newFavs;
             if (newTheme !== undefined) data.theme = newTheme;
-            try { await db.collection('artifacts').doc(appId).collection('public').doc('data').set(data, { merge: true }); }
-            catch (e) { console.error(e); }
-        }
 
-        async function pasteFromClipboard() {
             try {
-                const text = await navigator.clipboard.readText();
-                if (text) {
-                    runCode(text);
-                }
-            } catch (err) {
-                console.error("Clipboard error:", err);
-                openPasteModal(); // Fallback to manual if permission denied
+                await db.collection('artifacts').doc(appId).collection('public').doc('data').set(data, { merge: true });
+            } catch (e) {
+                console.error("Save failed", e);
             }
         }
 
         function optimizerAction() {
             let code = optimizerEditor.value;
             if (!code.trim()) return;
+
             let optimized = code.trim().replace(/<!--[\s\S]*?-->/g, '').replace(/\n\s*\n/g, '\n');
+
             if (!optimized.toLowerCase().includes('<html')) {
                 optimized = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; display: flex; justify-content: center; align-items: center; background: #000; }</style><title>Optimized</title></head><body>${optimized}</body></html>`;
+            } else if (optimized.toLowerCase().includes('<head>') && !optimized.toLowerCase().includes('viewport')) {
+                optimized = optimized.replace(/<head>/i, `<head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>html, body { margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; display: flex; justify-content: center; align-items: center; background: #000; }canvas, svg, img, video, div[class*="scratch"] { max-width: 100vw !important; max-height: 100vh !important; width: auto !important; height: auto !important; object-fit: contain; }</style>`);
             }
+
             optimizerEditor.value = optimized;
             const btn = event.target;
             btn.innerText = "Done!";
@@ -629,21 +644,29 @@
             const lpmPatch = `
 <style>
     html, body { margin: 0 !important; padding: 0 !important; width: 100vw !important; height: 100vh !important; overflow: hidden !important; display: flex !important; justify-content: center !important; align-items: center !important; background-color: #000 !important; }
-    canvas, svg, img, video, iframe { max-width: 100vw !important; max-height: 100vh !important; width: 100% !important; height: 100% !important; object-fit: contain !important; margin: 0 !important; }
+    canvas, svg, img, video, iframe, .scratch-stage, .scratch-player { max-width: 100vw !important; max-height: 100vh !important; width: 100% !important; height: 100% !important; object-fit: contain !important; margin: 0 !important; }
 </style>
 <script>
     (function() {
         try {
             const originalRAF = window.requestAnimationFrame;
             window.requestAnimationFrame = function(cb) { return originalRAF(function(t) { try { cb(t); } catch(e) {} }); };
+            if (window.WebGLRenderingContext) {
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(p) { try { if (p === 0x9245) return 1; return getParameter.apply(this, arguments); } catch(e) { return 1; } };
+            }
         } catch(err) {}
     })();
 <\/script>`;
 
             let finalCode = code;
-            if (/<head>/i.test(code)) finalCode = code.replace(/<head>/i, '<head>' + lpmPatch);
-            else if (/<html>/i.test(code)) finalCode = code.replace(/<html>/i, '<html>' + lpmPatch);
-            else finalCode = lpmPatch + code;
+            if (/<head>/i.test(code)) {
+                finalCode = code.replace(/<head>/i, '<head>' + lpmPatch);
+            } else if (/<html>/i.test(code)) {
+                finalCode = code.replace(/<html>/i, '<html>' + lpmPatch);
+            } else {
+                finalCode = lpmPatch + code;
+            }
 
             iframe.srcdoc = finalCode;
             if (persist) updateCloudState(code, undefined, undefined);
@@ -656,6 +679,12 @@
                 : '<path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>';
         }
 
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && previewWrapper.classList.contains('pseudo-fullscreen')) {
+                toggleFullscreen();
+            }
+        });
+
         document.getElementById('toggle-sidebar-btn').onclick = () => {
             const sb = document.getElementById('sidebar');
             sb.style.display = (window.getComputedStyle(sb).display === 'none') ? 'flex' : 'none';
@@ -667,6 +696,7 @@
         };
 
         function setTheme(t, persist = true) {
+            currentTheme = t;
             document.body.className = `theme-${t}`;
             if (persist) {
                 localStorage.setItem('saved_theme', t);
@@ -679,7 +709,12 @@
             const file = e.target.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = (ev) => runCode(ev.target.result);
+                reader.onload = (ev) => {
+                    const content = ev.target.result;
+                    if (file.name.endsWith('.html') || content.trim().startsWith('<')) {
+                        runCode(content);
+                    }
+                };
                 reader.readAsText(file);
             }
         };
@@ -687,17 +722,41 @@
         function openPasteModal() {
             pasteEditor.value = currentCode;
             document.getElementById('paste-modal').classList.add('active');
+            requestAnimationFrame(() => pasteEditor.focus());
         }
-        function closePasteModal() { document.getElementById('paste-modal').classList.remove('active'); }
-        function applyPaste() { runCode(pasteEditor.value); closePasteModal(); }
+
+        function closePasteModal() {
+            document.getElementById('paste-modal').classList.remove('active');
+        }
+
+        function applyPaste() {
+            runCode(pasteEditor.value);
+            closePasteModal();
+        }
+
         function openOptimizerModal() {
             optimizerEditor.value = currentCode;
             document.getElementById('optimizer-modal').classList.add('active');
+            requestAnimationFrame(() => optimizerEditor.focus());
         }
-        function closeOptimizerModal() { document.getElementById('optimizer-modal').classList.remove('active'); }
-        function applyOptimizer() { runCode(optimizerEditor.value); closeOptimizerModal(); }
-        function openSaveModal() { document.getElementById('save-modal').classList.add('active'); }
-        function closeSaveModal() { document.getElementById('save-modal').classList.remove('active'); }
+
+        function closeOptimizerModal() {
+            document.getElementById('optimizer-modal').classList.remove('active');
+        }
+
+        function applyOptimizer() {
+            runCode(optimizerEditor.value);
+            closeOptimizerModal();
+        }
+
+        function openSaveModal() {
+            document.getElementById('save-modal').classList.add('active');
+            requestAnimationFrame(() => document.getElementById('project-name').focus());
+        }
+
+        function closeSaveModal() {
+            document.getElementById('save-modal').classList.remove('active');
+        }
 
         document.getElementById('save-btn-cloud').onclick = () => {
             const name = document.getElementById('project-name').value.trim();
@@ -710,31 +769,67 @@
         };
 
         function renderFavorites() {
-            if (sortableInstance) sortableInstance.destroy();
-            favoritesList.innerHTML = '';
+            if (sortableInstance) {
+                sortableInstance.destroy();
+                sortableInstance = null;
+            }
+
+            const fragment = document.createDocumentFragment();
             favorites.forEach((f, i) => {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'fav-wrapper';
-                wrapper.innerHTML = `<div class="delete-action"><svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></div><div class="fav-item"><div class="fav-name">${f.name}</div></div>`;
+                wrapper.innerHTML = `<div class="delete-action"><svg viewBox="0 0 24 24" style="width:24px;height:24px;"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></div><div class="fav-item"><div class="fav-name">${f.name}</div></div>`;
+
                 const item = wrapper.querySelector('.fav-item');
                 let startX = 0, currentX = 0;
-                item.addEventListener('touchstart', e => { startX = e.touches[0].clientX; item.style.transition = 'none'; }, {passive:true});
-                item.addEventListener('touchmove', e => {
-                    currentX = e.touches[0].clientX - startX;
-                    if (currentX < 0) item.style.transform = `translateX(${currentX}px)`;
-                }, {passive:true});
+
+                item.addEventListener('touchstart', (e) => {
+                    startX = e.touches[0].clientX;
+                    item.style.transition = 'none';
+                }, { passive: true });
+
+                item.addEventListener('touchmove', (e) => {
+                    const x = e.touches[0].clientX;
+                    const diff = x - startX;
+                    if (diff < 0) {
+                        currentX = diff;
+                        if (currentX < -120) currentX = -120 + (currentX + 120) * 0.2;
+                        item.style.transform = `translateX(${currentX}px)`;
+                    }
+                }, { passive: true });
+
                 item.addEventListener('touchend', () => {
-                    item.style.transition = 'transform 0.3s';
-                    if (currentX < -80) { deleteFav(i); } 
-                    else { item.style.transform = 'translateX(0)'; if (Math.abs(currentX) < 5) runCode(f.code); }
+                    item.style.transition = 'transform 0.3s cubic-bezier(0.2, 1, 0.2, 1)';
+                    if (currentX < -90) {
+                        deleteFav(i);
+                    } else {
+                        item.style.transform = 'translateX(0)';
+                        if (currentX > -10 && Math.abs(currentX) < 10) {
+                            runCode(f.code);
+                        }
+                    }
                     currentX = 0;
                 });
-                item.onclick = () => { if (currentX === 0) runCode(f.code); };
-                favoritesList.appendChild(wrapper);
+
+                item.onclick = () => {
+                    if (currentX === 0) runCode(f.code);
+                };
+
+                fragment.appendChild(wrapper);
             });
-            if (window.Sortable && favorites.length) {
+
+            favoritesList.innerHTML = '';
+            favoritesList.appendChild(fragment);
+            initSortable();
+        }
+
+        function initSortable() {
+            if (window.Sortable && favoritesList.children.length > 0) {
                 sortableInstance = new Sortable(favoritesList, {
-                    animation: 150, delay: 150, delayOnTouchOnly: true, ghostClass: 'sortable-ghost',
+                    animation: 150,
+                    delay: 150,
+                    delayOnTouchOnly: true,
+                    ghostClass: 'sortable-ghost',
                     onEnd: (evt) => {
                         const item = favorites.splice(evt.oldIndex, 1)[0];
                         favorites.splice(evt.newIndex, 0, item);
@@ -749,6 +844,12 @@
             updateCloudState(undefined, favorites, undefined);
         }
 
+        window.addEventListener('click', (e) => {
+            if (!e.target.closest('.toolbar-group')) {
+                themeDropdown.classList.remove('show');
+            }
+        });
+
         window.addEventListener('DOMContentLoaded', () => {
             const lastCode = localStorage.getItem('saved_code');
             const lastTheme = localStorage.getItem('saved_theme');
@@ -756,7 +857,10 @@
             if (lastTheme) setTheme(lastTheme, false);
         });
 
-        window.onclick = (e) => { if (!e.target.closest('.toolbar-group')) themeDropdown.classList.remove('show'); };
+        const autoSave = debounce((val) => { runCode(val); }, 1000);
+        pasteEditor.addEventListener('input', (e) => autoSave(e.target.value));
+        optimizerEditor.addEventListener('input', (e) => autoSave(e.target.value));
+
     </script>
 </body>
 </html>
